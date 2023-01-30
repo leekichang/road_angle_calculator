@@ -2,12 +2,15 @@ from typing import List, Union, Tuple
 import requests
 import os
 import cv2
+import shutil
 import numpy as np
 from itertools import product
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 import haversine
+
+from calcRoadAngle import *
 
 MAX_WORKERS = 8
 API_KEY = "AIzaSyAqm2-G0bi6UGtdb7wCMK8cd50qrZ4q2AQ"
@@ -101,7 +104,10 @@ def get_latlong_by_radius(location, radius_in_meter, rad_res):
         ang_res (float): Resolution of the angle.
     """
     # org_lat, org_lng = (float(n) for n in location.strip().split(","))
-    org_lat, org_lng = location.lat, location.lng
+    org_lat, org_lng = location.lat, location.lng 
+    """
+    각각 입력된 원래 위도 경도 나타내는 듯?
+    """
     # lat, long min, max
     lat_mm = \
         haversine.inverse_haversine((org_lat, org_lng), radius_in_meter, haversine.Direction.NORTH, unit=haversine.Unit.METERS)[0], \
@@ -118,6 +124,8 @@ def get_latlong_by_radius(location, radius_in_meter, rad_res):
 def get_available_image_locations(location, radius, copyright="Google", rad_res = 8) -> List[GeoInfo]:
     
     lat_mm, lat_res, lng_mm, lng_res = get_latlong_by_radius(location, radius_in_meter=radius, rad_res=rad_res)
+    # 주어진 Loacation에서 움직일 수 있는 범위와 resolution을 설정한다.
+    print(lat_mm, lat_res, lng_mm, lng_res)
     metadatas = []
     grids = [f"{lat},{lng}" for lat,lng in tqdm(product(np.arange(lat_mm[0],lat_mm[1],lat_res), np.arange(lng_mm[0],lng_mm[1],lng_res)))]
     # min, max, res로 lat, lng 돌면서 검색 
@@ -134,6 +142,8 @@ def get_available_image_locations(location, radius, copyright="Google", rad_res 
 
     available_locations = [GeoInfo(l) for l in new_sv_metadata_df['location']]
     # print("get_available_image_locations", available_locations, len(available_locations), i)
+    # 주어진 위치에서 streetview를 얻어올 수 있는 위치를 알아내서 return
+    print(f'available_locations: {available_locations}')
     return available_locations
 
 def get_image(location, size='3280x2640', radius=50):
@@ -170,13 +180,15 @@ def get_image_and_save(location, size='3280x2640', radius=50, save_dir="./", use
         cv2.imwrite(img_name, image)
     return image
 
-def get_360_image(location, fov, heading_per=None, radius=50, save_dir="./", build_pano=True, use_cache=True):
+def get_360_image(location, fov, angle:float, heading_per=90, radius=50, save_dir="./", build_pano=True, use_cache=True):
     if 360%fov != 0:
         print(f"Warning! 360 is not divisible by {fov}")
     
     # for heading_bias in range(0, 120):
     heading_bias = 0
-    headings = list(range(0, 360, heading_per if heading_per else fov))
+    # headings = list(range(0, 360, heading_per if heading_per else fov))
+    headings = [angle+heading_per*idx for idx in range(4)]
+    # 찾은 각도 기반으로 90도씩 회전하면서 이미지 추출
     pano_img = [None for _ in headings]
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exc:
         fut_to_idxs = {exc.submit(get_image_and_save, location.update_additional_info(fov, heading+heading_bias, 0),save_dir=save_dir, use_cache=use_cache):i for i,heading in enumerate(headings)}
@@ -195,20 +207,45 @@ def get_360_image(location, fov, heading_per=None, radius=50, save_dir="./", bui
 
 
 if __name__ == "__main__":
+    # location= "37.3887, 126.6428" # lat/lng
+    # location = "1.296056, 103.850541" # SMU 
+    location = "37.4984, 127.0279" # Gangnam
+    # location = "37.49830359656146,127.0280343987743"
+    # location = "37.380489, 126.667467" # YONSEI
+    # location = "37.390540, 126.644650"
+    # location = "37.395093, 126.638768"
+
+    latitude, longitude = location.split(',')
+    if os.path.exists(f'imgs/{latitude}_{longitude}.png'):
+        img = cv2.imread(f'imgs/{latitude}_{longitude}.png')
+    else:
+        data = get_map_image(latitude, longitude)
+        img = bytes2img(data)
+        cv2.imwrite(f'imgs/{latitude}_{longitude}.png', img)
+
+    edges = cv2.Canny(img, 100, 200)
+    point = find_closest_nonzero_point(edges)
+
+    points = find_nonzero_in_window(edges, point, kernel_size=20)
+    slope, intercept = find_line_from_points(points)
+    angle = np.rad2deg(np.arctan(slope))[0]
+    print(f"The angle of road is {angle}°")
+    
+    tmp = visualize_line(edges, slope, intercept)
+    # cv2.imshow('fitted line', tmp)
+    # cv2.waitKey(0)
+    # cv2.destroyAllWindows()
+
     save_dir = "./save_imgs"
+    shutil.rmtree(save_dir)
     os.makedirs(save_dir, exist_ok=True)
     
     sv_metadata_path = None
 
-    # location= "37.3887, 126.6428" # lat/lng
-    location = "37.380489, 126.667467" # YONSEI
-    location = "1.296056, 103.850541" # SMU 
-    location = "37.4984, 127.0279" # Gangnam
-    location = "37.49830359656146, 127.0280343987743"
-    location = "37.390540, 126.644650"
-    location = "37.395093, 126.638768"
-    fov      = 15
+    fov      = 120
 
     available_img_locs = get_available_image_locations(GeoInfo(location), radius=6, rad_res=3)
-    for location in available_img_locs:
-        pano_img = get_360_image(location, fov, heading_per=120, save_dir=save_dir, build_pano=False)
+    for location in available_img_locs[:1]:
+        pano_img = get_360_image(location, fov, angle=angle, save_dir=save_dir, build_pano=False)
+    
+    
