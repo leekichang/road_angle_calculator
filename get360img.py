@@ -207,7 +207,7 @@ if __name__ == "__main__":
     location = "37.49830359656146, 127.0280343987743"
     location = "37.390540, 126.644650"
     location = "37.395093, 126.638768"
-    fov     = 15
+    fov      = 15
 
     available_img_locs = get_available_image_locations(GeoInfo(location), radius=6, rad_res=3)
     for location in available_img_locs:
